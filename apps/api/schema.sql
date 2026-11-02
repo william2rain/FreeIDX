@@ -11,9 +11,9 @@
 --   pnpm --filter @freeidx/api db:apply && pnpm --filter @freeidx/api db:schema:dump
 -- 并把 migrations/ 与 schema.sql 一起提交。
 --
--- 对象统计：32 表 / 72 索引
+-- 对象统计：33 表 / 72 索引
 
--- ===== 表（32）=====
+-- ===== 表（33）=====
 CREATE TABLE bbs_ad_slot (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   position TEXT NOT NULL DEFAULT '',
@@ -168,6 +168,14 @@ CREATE TABLE bbs_group (
   allowsell INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE bbs_guest_daily (
+  ip TEXT NOT NULL,
+  day_start INTEGER NOT NULL,
+  cnt INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (ip, day_start)
+);
+DELETE FROM sqlite_sequence;
+
 CREATE TABLE bbs_kv (
   k TEXT PRIMARY KEY,
   v TEXT NOT NULL DEFAULT '',
@@ -265,7 +273,9 @@ CREATE TABLE bbs_post (
   quotepid INTEGER NOT NULL DEFAULT 0,
   message TEXT NOT NULL DEFAULT '',
   message_fmt TEXT NOT NULL DEFAULT '',
-  ok INTEGER NOT NULL DEFAULT 1
+  ok INTEGER NOT NULL DEFAULT 1,
+  guest_name TEXT NOT NULL DEFAULT '',
+  guest_token_hash TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE bbs_post_like (
@@ -274,7 +284,6 @@ CREATE TABLE bbs_post_like (
   tid INTEGER NOT NULL DEFAULT 0,
   create_date INTEGER NOT NULL DEFAULT 0
 );
-DELETE FROM sqlite_sequence;
 
 CREATE TABLE bbs_queue (
   queueid INTEGER NOT NULL DEFAULT 0,

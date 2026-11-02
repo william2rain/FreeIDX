@@ -132,11 +132,11 @@ export function checkRoutes(): Hono<ReadEnv> {
         }
       } else {
         const p = await db
-          .prepare<{ tid: number; uid: number; ok: number; create_date: number }>(
-            'SELECT tid,uid,ok,create_date FROM bbs_post WHERE pid = ? AND isfirst = 0',
+          .prepare<{ tid: number; uid: number; ok: number; create_date: number; guest_name: string }>(
+            'SELECT tid,uid,ok,create_date,guest_name FROM bbs_post WHERE pid = ? AND isfirst = 0',
           )
           .bind(id)
-          .first<{ tid: number; uid: number; ok: number; create_date: number }>();
+          .first<{ tid: number; uid: number; ok: number; create_date: number; guest_name: string }>();
         if (!p) throw new AppError(Code.NOT_FOUND, t('common.postNotFound'));
         const stmts: Stmt[] = [
           db.prepare('UPDATE bbs_post SET ok = ? WHERE pid = ? AND isfirst = 0').bind(opt, id) as unknown as Stmt,
@@ -144,11 +144,12 @@ export function checkRoutes(): Hono<ReadEnv> {
         // 待审/被拒回帖过审 → 补主题反规范化列（发帖待审时未计入 posts/尾列；ok≠1 守卫幂等，重复通过不重复计数）。
         // 尾列用 lastpid < pid 条件：仅当该回帖比当前尾部新才覆盖（乱序过审不回退尾部）。
         // lastusername 用标量子查询取回帖者当前用户名（SQLite 无 UPDATE JOIN；D1 支持，cronDaily 校准同款）。
+        // 访客帖的 uid=0 在用户表无行，子查询会落空 → 改用 COALESCE 回落到该帖 guest_name，保证尾列不被写空。
         if (opt === 1 && Number(p.ok) !== 1) {
           stmts.push(
             db.prepare('UPDATE bbs_thread SET posts = posts + 1 WHERE tid = ?').bind(p.tid) as unknown as Stmt,
-            db.prepare('UPDATE bbs_thread SET lastpid = ?, lastuid = ?, last_date = ?, lastusername = (SELECT username FROM bbs_user WHERE uid = ?) WHERE tid = ? AND lastpid < ?')
-              .bind(id, p.uid, p.create_date, p.uid, p.tid, id) as unknown as Stmt,
+            db.prepare('UPDATE bbs_thread SET lastpid = ?, lastuid = ?, last_date = ?, lastusername = COALESCE((SELECT username FROM bbs_user WHERE uid = ?), (SELECT guest_name FROM bbs_post WHERE pid = ?)) WHERE tid = ? AND lastpid < ?')
+              .bind(id, p.uid, p.create_date, p.uid, id, p.tid, id) as unknown as Stmt,
           );
         } else if (opt !== 1 && Number(p.ok) === 1) {
           // 已过审回帖被拒绝/打回：同步回退主题回帖数，避免再次过审时二次 +1（拒绝→通过 = 虚增一条）

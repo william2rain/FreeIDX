@@ -26,6 +26,14 @@ import { forumLangOf, loadForumlist, loadGrouplist, loadSetting, loadViewer, req
 import { CheckStatus, canSeeUnapproved, checkOrNot, hasSeeCheck, shouldBlockUnapproved } from '../../core/check';
 import { attachKeysByPid, attachKeysByTid, postPurgeStmts, purgeR2Objects, threadPurgeStmts } from '../../core/purge';
 import { ipToLong } from '../../core/auth/session';
+import {
+  GUEST_DAILY_LIMIT,
+  beijingDayStart,
+  hashGuestToken,
+  isReservedGuestName,
+  isValidGuestToken,
+  normalizeGuestName,
+} from '../../core/guest';
 import { getExtensions } from '../../core/extensions';
 import { isEnabled, loadExtensionsState } from '../../core/extensions/registry';
 import { loadExtConfig } from '../../core/ext-store';
@@ -284,6 +292,10 @@ async function createThread(c: Ctx): Promise<Response> {
 async function createReply(c: Ctx): Promise<Response> {
   const t = c.get('t');
   const core: Core = { db: c.get('db'), cache: c.get('cache') };
+  // 访客分支：只放宽本回帖接口的登录关。发新主题（createThread）仍走 requireLogin，不动。
+  // 未登录时 loadViewer 返回 uid=0 的游客上下文；登录用户继续走原有流程。
+  const rawViewer = await loadViewer(core.cache, core.db, c);
+  if (rawViewer.uid <= 0) return createGuestReply(c, core);
   const { viewer, ctx } = await requireLogin(core, c);
   const tid = intParam(c.req.param('tid'));
   const b = await readJson<CreatePostReq>(c);
@@ -426,6 +438,137 @@ async function createReply(c: Ctx): Promise<Response> {
   await scheduleSeo(core, c, tid, 'gen');
 
   return ok(c, gain || t('write.replyDone'), { data: { pid, tid } });
+}
+
+/**
+ * 访客回帖（guest reply）——与登录回帖同路由、不同分支（createReply 入口分流）。
+ * 锁定方案：填昵称、仅回帖、每 IP 每天 ≤3 条（北京时间自然日）、每次过 Turnstile、
+ * 一律先审后放（ok=0）、游客组 allowpost 为第二道关。
+ * 与登录回帖的区别（刻意）：不查用户表、不进 bbs_mypost、不计 user.posts、不发积分、
+ * 不发通知、不挂附件、不走快速回复插件的按 uid 计数（uid=0 会把所有访客算成一人）。
+ * 访客帖不更新主题反规范化列（posts/lastpid/lastuid/last_date/lastusername），
+ * 与登录待审回帖同口径；过审时由 /api/check（act=1,opt=1）补列（见 check/routes.ts 的访客尾列处理）。
+ */
+async function createGuestReply(c: Ctx, core: Core): Promise<Response> {
+  const t = c.get('t');
+  const b = await readJson<CreatePostReq>(c);
+  // 人机验证在任何 D1 写之前（与登录回帖同口径；未配 TURNSTILE_SECRET 时 verifyTurnstile 直通）。
+  if (!(await verifyTurnstile(c.env, b.turnstileToken, reqIp(c)))) throw new AppError(Code.CAPTCHA_FAILED, t('auth.captchaFailed'));
+
+  const [forumlist, grouplist] = await Promise.all([loadForumlist(core.cache, core.db), loadGrouplist(core.cache, core.db)]);
+  // 游客上下文：uid=0、gid=0（游客组）。forumAccessUser 据此查游客组权限，见方案第 6 条。
+  const ctx = makeAccessCtx({ uid: 0, gid: 0, username: '', ok: 1 }, forumlist, grouplist);
+
+  const tid = intParam(c.req.param('tid'));
+  const thread = await core.db
+    .prepare<{ fid: number; closed: number; top: number; uid: number; posts: number; subject: string; ok: number }>(
+      'SELECT fid,closed,top,uid,posts,subject,ok FROM bbs_thread WHERE tid = ?',
+    )
+    .bind(tid)
+    .first<{ fid: number; closed: number; top: number; uid: number; posts: number; subject: string; ok: number }>();
+  if (!thread) throw new AppError(Code.NOT_FOUND, t('common.threadNotFound'));
+  const fid = Number(thread.fid);
+  if (!ctx.forumlist[fid]) throw new AppError(Code.NOT_FOUND, t('common.forumNotFound'));
+  // 第二道关：游客组 allowpost 关掉时访客也不能留言（accesson=1 时还需版块矩阵同为 1）。
+  if (!forumAccessUser(ctx, fid, 'allowpost')) throw new AppError(Code.NO_PERMISSION, t('common.groupPermDenied'));
+  // 可见性口径同读路径：待审/回收主题不对访客开放回帖（isAuthor 恒 false，主题作者不可能是访客）。
+  if (
+    !canSeeUnapproved(Number(thread.ok), {
+      seeCheck: hasSeeCheck(ctx.grouplist[0]),
+      isAuthor: false,
+    })
+  ) {
+    throw new AppError(Code.NOT_FOUND, t('common.threadNotFound'));
+  }
+  // closed：游客（gid=0）禁回，与登录回帖的 closed 规则一致。
+  if (Number(thread.closed) > 0) throw new AppError(Code.NO_PERMISSION, t('write.threadClosed'));
+
+  const message = (b.message ?? '').toString();
+  if (!message.trim()) throw new AppError(Code.VALIDATION_ERROR, t('write.contentRequired'));
+  const doctype = Number(b.doctype ?? 0);
+  if (codeLen(message) > MESSAGE_MAX_CHARS) throw new AppError(Code.FORM_MESSAGE_TOO_LONG, t('write.contentTooLong'));
+  // 访客不挂附件：附件须登录上传，访客带 aids 可能是借他人附件 id 挂接，直接拒绝。
+  if (Array.isArray(b.attachAids) && b.attachAids.length > 0) {
+    throw new AppError(Code.VALIDATION_ERROR, t('write.guestAttachDenied'));
+  }
+
+  // 昵称：归一后 1~20 码点；保留字拒绝；与已注册用户名（不区分大小写）重名拒绝。
+  const guestName = normalizeGuestName(b.guestName);
+  if (!guestName) throw new AppError(Code.VALIDATION_ERROR, t('write.guestNameInvalid'));
+  if (isReservedGuestName(guestName)) throw new AppError(Code.VALIDATION_ERROR, t('write.guestNameReserved'));
+  const taken = await core.db
+    .prepare<{ x: number }>('SELECT 1 AS x FROM bbs_user WHERE lower(username) = lower(?) LIMIT 1')
+    .bind(guestName)
+    .first<{ x: number }>();
+  if (taken) throw new AppError(Code.VALIDATION_ERROR, t('write.guestNameTaken'));
+  // 访客令牌：前端 localStorage 随机串；后端只存哈希。
+  if (!isValidGuestToken(b.guestToken)) throw new AppError(Code.VALIDATION_ERROR, t('write.guestTokenInvalid'));
+  const tokenHash = await hashGuestToken(b.guestToken as string);
+
+  // 每 IP 每天限量（北京时间自然日）：计数在后端做，前端不参与判定。
+  const ipStr = reqIp(c);
+  const dayStart = beijingDayStart(now());
+  const used = await core.db
+    .prepare<{ cnt: number }>('SELECT cnt FROM bbs_guest_daily WHERE ip = ? AND day_start = ?')
+    .bind(ipStr, dayStart)
+    .first<{ cnt: number }>();
+  if (Number(used?.cnt ?? 0) >= GUEST_DAILY_LIMIT) {
+    throw new AppError(Code.NO_PERMISSION, t('write.guestDailyLimit'));
+  }
+
+  // quotepid 校验：必须存在且同属本主题；被引用楼层若待审且不属于本访客本人，引用归零
+  // （否则可借引用摘要泄露他人待审内容）。
+  let quotepid = Number(b.quotepid ?? 0);
+  let quoteHtml = '';
+  if (quotepid > 0) {
+    const q = await core.db
+      .prepare<{ pid: number; tid: number; uid: number; message: string; ok: number; guest_name: string; guest_token_hash: string }>(
+        'SELECT pid,tid,uid,message,ok,guest_name,guest_token_hash FROM bbs_post WHERE pid = ?',
+      )
+      .bind(quotepid)
+      .first<{ pid: number; tid: number; uid: number; message: string; ok: number; guest_name: string; guest_token_hash: string }>();
+    if (!q || Number(q.tid) !== tid) {
+      quotepid = 0;
+    } else if (Number(q.ok) !== 1 && String(q.guest_token_hash ?? '') !== tokenHash) {
+      quotepid = 0;
+    } else {
+      const quoteAuthor =
+        Number(q.uid) > 0
+          ? String(
+              (
+                await core.db
+                  .prepare<{ username: string }>('SELECT username FROM bbs_user WHERE uid = ?')
+                  .bind(Number(q.uid))
+                  .first<{ username: string }>()
+              )?.username ?? '',
+            )
+          : String(q.guest_name ?? '');
+      quoteHtml = postQuoteHtml(Number(q.uid), quoteAuthor, 0, postBrief(String(q.message)));
+    }
+  }
+
+  const fmt = postMessageFmt({ message, doctype, quotepid }, 0, quoteHtml);
+  const ts = now();
+  const ip = ipLongOf(c);
+  // 访客帖一律 ok=0（先审后放），与登录回帖的 checkOrNot 判定无关：访客没有「组审核位」可配，
+  // 若按 checkOrNot(游客组, 版块, 'post') 走，版块未开 post_check 时访客帖会直接公开，违背方案。
+  const postR = await core.db
+    .prepare<{ pid: number }>(
+      'INSERT INTO bbs_post (tid,uid,isfirst,create_date,userip,doctype,quotepid,message,message_fmt,guest_name,guest_token_hash,ok) VALUES (?,?,0,?,?,?,?,?,?,?,?,?) RETURNING pid',
+    )
+    .bind(tid, 0, ts, ip, doctype, quotepid, fmt.message, fmt.message_fmt, guestName, tokenHash, CheckStatus.PENDING)
+    .first<{ pid: number }>();
+  const pid = Number(postR?.pid ?? 0);
+  if (!pid) throw new AppError(Code.SYSTEM_ERROR, t('write.replyFailed'));
+
+  // 计数递增（与发帖分开：发帖失败不占额度；并发双击有极小窗口可多出 1 条，见最终说明）。
+  await core.db
+    .prepare('INSERT INTO bbs_guest_daily (ip, day_start, cnt) VALUES (?, ?, 1) ON CONFLICT(ip, day_start) DO UPDATE SET cnt = cnt + 1')
+    .bind(ipStr, dayStart)
+    .run();
+
+  await patchRuntime(core.cache, { posts: 1, todayposts: 1 });
+  return ok(c, t('write.guestReplyPending'), { data: { pid, tid } });
 }
 
 /**

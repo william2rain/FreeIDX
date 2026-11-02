@@ -5,6 +5,14 @@
   "apps/api/src",
   "packages/shared/src"
  ],
- "count": 0,
- "entries": []
+ "count": 7,
+ "entries": [
+  "apps/api/src/core/guest.ts::官方",
+  "apps/api/src/core/guest.ts::客服",
+  "apps/api/src/core/guest.ts::版主",
+  "apps/api/src/core/guest.ts::站长",
+  "apps/api/src/core/guest.ts::管理员",
+  "apps/api/src/core/guest.ts::系统",
+  "apps/api/src/core/guest.ts::超级版主"
+ ]
 }

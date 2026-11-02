@@ -26,7 +26,7 @@ function rules(): SqlRule[] {
     { test: /FROM bbs_group/, rows: [GROUP_SEECHECK] },
     { test: /FROM bbs_forum ORDER BY/, rows: [] },
     { test: /bbs_forum_access/, rows: [] },
-    { test: /SELECT tid,uid,ok,create_date FROM bbs_post WHERE pid = \? AND isfirst = 0/, first: { tid: 9, uid: 7, ok: 0, create_date: 1700000000 } },
+    { test: /SELECT tid,uid,ok,create_date,guest_name FROM bbs_post WHERE pid = \? AND isfirst = 0/, first: { tid: 9, uid: 7, ok: 0, create_date: 1700000000, guest_name: '' } },
     { test: /UPDATE bbs_post|UPDATE bbs_thread/, rows: [] },
   ];
 }
@@ -44,11 +44,12 @@ describe('POST /api/check（回帖过审补列）', () => {
     const { env, calls } = makeEnv();
     const res = await app.request('/api/check', { method: 'POST', headers: headers(), body: JSON.stringify({ act: 1, id: 100, opt: 1 }) }, env);
     expect(((await res.json()) as { code: number }).code).toBe(Code.OK);
+    // 访客帖过审时 lastusername 回落 guest_name（0025）：uid=0 在用户表无行，纯子查询会写空。
     const tail = calls.find((c) =>
-      /UPDATE bbs_thread SET lastpid = \?, lastuid = \?, last_date = \?, lastusername = \(SELECT username FROM bbs_user WHERE uid = \?\) WHERE tid = \? AND lastpid < \?/.test(c.sql),
+      /UPDATE bbs_thread SET lastpid = \?, lastuid = \?, last_date = \?, lastusername = COALESCE\(\(SELECT username FROM bbs_user WHERE uid = \?\), \(SELECT guest_name FROM bbs_post WHERE pid = \?\)\) WHERE tid = \? AND lastpid < \?/.test(c.sql),
     );
     expect(tail).toBeTruthy();
-    expect(tail?.params).toEqual([100, 7, 1700000000, 7, 9, 100]);
+    expect(tail?.params).toEqual([100, 7, 1700000000, 7, 100, 9, 100]);
   });
 
   it('act=0 opt=-2：see_check 但无目标版块 allowdelete → 拒绝真删（不执行任何删除）', async () => {

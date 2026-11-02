@@ -33,6 +33,7 @@ import {
 import type { AccessCtx } from '../../core/access';
 import { loadForumlist, loadGrouplist, loadSetting, loadViewer, makeAccessCtx } from '../../core/loaders';
 import { canSeeUnapproved, hasSeeCheck } from '../../core/check';
+import { hashGuestToken, isGuestPost, isValidGuestToken } from '../../core/guest';
 import { loadExtConfig } from '../../core/ext-store';
 import { isEnabled, loadExtensionsState } from '../../core/extensions/registry';
 import { IDX_EXT_ID, IDX_MANIFEST } from '../../extensions/legacy-extensions';
@@ -93,6 +94,8 @@ interface PostRow {
   message_fmt: string;
   /** 审核位（tt_check）：非 1 仅作者与 see_check 组可见 */
   ok: number;
+  /** 访客帖昵称（0025；登录帖为空串）。guest_token_hash 绝不进本行（见下方单独查询）。 */
+  guest_name: string;
 }
 
 interface AttachRow {
@@ -518,10 +521,32 @@ export function threadRoutes(): Hono<ReadEnv> {
       .prepare<PostRow>(`SELECT ${POST_PAGE_COLS} FROM ${P} WHERE tid = ? ORDER BY pid ASC ${off.sql}`)
       .bind(tid, ...off.params)
       .all();
-    // 回帖审核过滤（ok!=1 且非 see_check 组且非作者 → 剔除）
-    const posts = postsR.results.filter((p) =>
-      canSeeUnapproved(Number(p.ok), { seeCheck, isAuthor: Number(p.uid) === viewer.uid }),
-    );
+    // 访客认领：请求方带来的访客令牌（X-Guest-Token 头）只用于匹配本页待审访客帖，
+    // 哈希绝不下发。注意：不能用 uid===viewer.uid 判访客作者——游客 uid 恒为 0，
+    // 那样会把所有访客待审帖都判成「本人」，直接泄露。
+    const guestTokenRaw = c.req.header('x-guest-token');
+    const guestTokenHash = isValidGuestToken(guestTokenRaw) ? await hashGuestToken(guestTokenRaw as string) : '';
+    const guestHashByPid = new Map<number, string>();
+    if (guestTokenHash) {
+      const pendingGuest = postsR.results.filter((p) => isGuestPost(p) && Number(p.ok) !== 1);
+      if (pendingGuest.length) {
+        const inList = pendingGuest.map(() => '?').join(',');
+        const hashR = await db
+          .prepare<{ pid: number; guest_token_hash: string }>(
+            `SELECT pid, guest_token_hash FROM ${P} WHERE pid IN (${inList})`,
+          )
+          .bind(...pendingGuest.map((p) => p.pid))
+          .all();
+        for (const r of hashR.results) guestHashByPid.set(Number(r.pid), String(r.guest_token_hash ?? ''));
+      }
+    }
+    // 回帖审核过滤（ok!=1 且非 see_check 组且非作者 → 剔除；访客帖另按令牌认领本人待审帖）
+    const posts = postsR.results.filter((p) => {
+      if (Number(p.ok) === 1 || seeCheck) return true;
+      if (viewer.uid > 0 && Number(p.uid) === viewer.uid) return true;
+      if (isGuestPost(p) && guestTokenHash && guestHashByPid.get(Number(p.pid)) === guestTokenHash) return true;
+      return false;
+    });
     const pids = posts.map((p) => p.pid);
 
     // 楼层点赞：一次 IN 批量取「各 pid 计数」+「当前访问者已赞集合」（§7 禁 N+1）
@@ -628,11 +653,15 @@ export function threadRoutes(): Hono<ReadEnv> {
       const author = usersMap.get(p.uid);
       const quote = quotedR?.results.find((q) => q.pid === p.quotepid);
       const canUpd = canUpdatePost(ctx, thread.fid, p.uid);
+      const guest = isGuestPost(p);
       return {
         pid: p.pid,
         tid: p.tid,
         uid: p.uid,
-        username: p.isfirst ? thread.username : (author?.username ?? ''),
+        // 访客帖：昵称取 guest_name，绝不查用户表；isGuest 供前台渲染游客标识（不链 /user/0）。
+        // canUpdatePost 已有 ctx.uid>0 守卫，访客不会因 uid=0 与楼层 uid=0 相等而拿到编辑权。
+        username: p.isfirst ? thread.username : guest ? String(p.guest_name ?? '') : (author?.username ?? ''),
+        ...(guest ? { isGuest: true } : {}),
         avatar: p.isfirst ? thread.avatar : (author?.avatar ?? 0),
         /** 作者 V 头衔（'0'=未认证；仅认证作者下发） */
         ...((author?.uv ?? '0') !== '0' ? { v: author!.uv } : {}),
@@ -765,23 +794,44 @@ export function threadRoutes(): Hono<ReadEnv> {
     const seeCheck = hasSeeCheck(grouplist[viewer.gid]);
     // head 楼层与所属主题均须过审（或访问者为版务/作者）：否则待审/回收站内容可借本端点 head 字段泄露
     // （口径与帖内楼层列表的 canSeeUnapproved 一致；主题不可见时整端点 404）。
-    const threadVisible = canSeeUnapproved(Number(head.tok), { seeCheck, isAuthor: Number(head.tuid) === viewer.uid });
-    if (!threadVisible || !canSeeUnapproved(Number(head.pok), { seeCheck, isAuthor: Number(head.uid) === viewer.uid })) {
+    // 访客作者判定须加 uid>0 守卫：游客 uid 恒为 0，否则所有访客待审楼层都会被判成「本人」。
+    const threadVisible = canSeeUnapproved(Number(head.tok), { seeCheck, isAuthor: viewer.uid > 0 && Number(head.tuid) === viewer.uid });
+    if (!threadVisible || !canSeeUnapproved(Number(head.pok), { seeCheck, isAuthor: viewer.uid > 0 && Number(head.uid) === viewer.uid })) {
       throw new AppError(Code.NOT_FOUND, t('common.postNotFound'));
     }
     const off = shallowOffset(page, size);
     const [cnt, r] = await Promise.all([
       db.prepare<{ c: number }>(`SELECT COUNT(*) AS c FROM ${P} WHERE quotepid = ?`).bind(pid).first<{ c: number }>(),
       db
-        .prepare<{ pid: number; uid: number; create_date: number; message_fmt: string; ok: number }>(
-          `SELECT pid,uid,create_date,message_fmt,ok FROM ${P} WHERE quotepid = ? ORDER BY create_date ASC ${off.sql}`,
+        .prepare<{ pid: number; uid: number; create_date: number; message_fmt: string; ok: number; guest_name: string }>(
+          `SELECT pid,uid,create_date,message_fmt,ok,guest_name FROM ${P} WHERE quotepid = ? ORDER BY create_date ASC ${off.sql}`,
         )
         .bind(pid, ...off.params)
         .all(),
     ]);
     const total = Number(cnt?.c ?? 0);
+    // 访客认领（同详情页口径）：待审访客回复只返回给令牌匹配的本人；其余访客不得借本端点看到。
+    const repliesGuestTokenRaw = c.req.header('x-guest-token');
+    const repliesGuestTokenHash = isValidGuestToken(repliesGuestTokenRaw) ? await hashGuestToken(repliesGuestTokenRaw as string) : '';
+    const repliesGuestHashByPid = new Map<number, string>();
+    if (repliesGuestTokenHash) {
+      const pendingGuestRows = r.results.filter((x) => isGuestPost(x) && Number(x.ok) !== 1);
+      if (pendingGuestRows.length) {
+        const inList = pendingGuestRows.map(() => '?').join(',');
+        const hashR = await db
+          .prepare<{ pid: number; guest_token_hash: string }>(`SELECT pid, guest_token_hash FROM ${P} WHERE pid IN (${inList})`)
+          .bind(...pendingGuestRows.map((x) => x.pid))
+          .all();
+        for (const h of hashR.results) repliesGuestHashByPid.set(Number(h.pid), String(h.guest_token_hash ?? ''));
+      }
+    }
     const rows = r.results.filter(
-      (x) => canSeeUnapproved(Number(x.ok), { seeCheck, isAuthor: Number(x.uid) === viewer.uid }) && threadVisible,
+      (x) =>
+        threadVisible &&
+        (Number(x.ok) === 1 ||
+          seeCheck ||
+          (viewer.uid > 0 && Number(x.uid) === viewer.uid) ||
+          (isGuestPost(x) && repliesGuestTokenHash !== '' && repliesGuestHashByPid.get(Number(x.pid)) === repliesGuestTokenHash)),
     );
     const uids = [...new Set([Number(head.uid), ...rows.map((x) => Number(x.uid))])];
     const usersMap = new Map<number, { username: string; avatar: number; avatarAuto: string }>();
@@ -800,13 +850,15 @@ export function threadRoutes(): Hono<ReadEnv> {
         });
       }
     }
-    const toItem = (pidV: number, uid: number, createDate: number, messageFmt: string): PostReplyItem => {
+    const toItem = (pidV: number, uid: number, createDate: number, messageFmt: string, guestName?: string): PostReplyItem => {
       const u = usersMap.get(uid);
+      const guest = Number(uid) === 0 && String(guestName ?? '').length > 0;
       return {
         pid: pidV,
         uid,
-        username: u?.username ?? '',
+        username: guest ? String(guestName ?? '') : (u?.username ?? ''),
         avatar: u?.avatar ?? 0,
+        ...(guest ? { isGuest: true } : {}),
         ...(u?.avatarAuto ? { avatar_auto: u.avatarAuto } : {}),
         createDate,
         messageFmt,
@@ -815,7 +867,7 @@ export function threadRoutes(): Hono<ReadEnv> {
     return ok(c, 'ok', {
       data: {
         head: toItem(Number(head.pid), Number(head.uid), Number(head.create_date), String(head.message_fmt ?? '')),
-        list: rows.map((x) => toItem(Number(x.pid), Number(x.uid), Number(x.create_date), String(x.message_fmt ?? ''))),
+        list: rows.map((x) => toItem(Number(x.pid), Number(x.uid), Number(x.create_date), String(x.message_fmt ?? ''), String(x.guest_name ?? ''))),
         page,
         size,
         total,
@@ -995,8 +1047,9 @@ export function threadRoutes(): Hono<ReadEnv> {
         create_date: number;
         ok: number;
         likes: number;
+        guest_name: string;
       }>(
-        `SELECT p.pid,p.uid,p.isfirst,p.doctype,p.quotepid,p.images,p.files,p.message_fmt,p.create_date,p.ok,COUNT(pl.uid) AS likes
+        `SELECT p.pid,p.uid,p.isfirst,p.doctype,p.quotepid,p.images,p.files,p.message_fmt,p.create_date,p.ok,p.guest_name,COUNT(pl.uid) AS likes
          FROM ${P} p JOIN bbs_post_like pl ON pl.pid = p.pid
          WHERE p.tid = ?${includeFirst ? '' : ' AND p.isfirst = 0'}
          GROUP BY p.pid HAVING likes >= ?
@@ -1005,7 +1058,8 @@ export function threadRoutes(): Hono<ReadEnv> {
       .bind(tid, threshold, limit)
       .all();
     const rows = r.results.filter((x) =>
-      canSeeUnapproved(Number(x.ok), { seeCheck, isAuthor: Number(x.uid) === viewer.uid }),
+      // uid>0 守卫：热门回复也可能含访客待审帖，游客 uid=0 时不得判成「本人」而泄露。
+      canSeeUnapproved(Number(x.ok), { seeCheck, isAuthor: viewer.uid > 0 && Number(x.uid) === viewer.uid }),
     );
     const uids = [...new Set(rows.map((x) => Number(x.uid)))];
     // 当前访问者已赞集合（登录态；一次 IN 批量）
@@ -1041,7 +1095,9 @@ export function threadRoutes(): Hono<ReadEnv> {
         pid: Number(x.pid),
         tid,
         uid: Number(x.uid),
-        username: u?.username ?? '',
+        // 已过审访客帖：昵称取 guest_name（否则热门回复里作者为空白）。
+        username: isGuestPost(x) ? String(x.guest_name ?? '') : (u?.username ?? ''),
+        ...(isGuestPost(x) ? { isGuest: true } : {}),
         avatar: u?.avatar ?? 0,
         ...((u?.uv ?? '0') !== '0' ? { v: u!.uv } : {}),
         ...(u?.avatarAuto ? { avatar_auto: u.avatarAuto } : {}),
@@ -1106,8 +1162,8 @@ export function threadRoutes(): Hono<ReadEnv> {
     ]);
     const ctx = makeAccessCtx(viewer, forumlist, grouplist);
     const r = await db
-      .prepare<{ pid: number; tid: number; uid: number; message_fmt: string; create_date: number; fid: number; top: number }>(
-        `SELECT p.pid,p.tid,p.uid,p.message_fmt,p.create_date,t.fid,t.top
+      .prepare<{ pid: number; tid: number; uid: number; message_fmt: string; create_date: number; fid: number; top: number; guest_name: string }>(
+        `SELECT p.pid,p.tid,p.uid,p.message_fmt,p.create_date,t.fid,t.top,p.guest_name
          FROM ${P} p INNER JOIN ${T} t ON t.tid = p.tid
          WHERE p.isfirst = 0 AND p.quotepid = 0 AND p.ok = 1 AND t.ok = 1
          ORDER BY p.pid DESC LIMIT 20`,
@@ -1137,7 +1193,9 @@ export function threadRoutes(): Hono<ReadEnv> {
         pid: Number(x.pid),
         tid: Number(x.tid),
         uid: Number(x.uid),
-        username: users.get(Number(x.uid))?.username ?? '',
+        // 已过审访客帖：昵称取 guest_name（否则发现页最新评论里作者为空白）；isGuest 供前台补游客标识。
+        username: isGuestPost(x) ? String(x.guest_name ?? '') : (users.get(Number(x.uid))?.username ?? ''),
+        ...(isGuestPost(x) ? { isGuest: true } : {}),
         avatar: users.get(Number(x.uid))?.avatar ?? 0,
         text: chars.length > 25 ? `${chars.slice(0, 25).join('')}…` : text,
         createDate: Number(x.create_date),

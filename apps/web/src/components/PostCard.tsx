@@ -139,21 +139,37 @@ export function PostCard(props: {
       id={`pid-${p.pid}`}
       className="flex scroll-mt-20 items-start gap-2.5 border-b border-zh-line px-5 py-[0.7rem] last:border-b-0 sm:scroll-mt-24"
     >
+      {/* 访客帖：用户名带游客标识，且不链到不存在的 /user/0（访客无账号主页）。 */}
       <div className="w-10 shrink-0 text-center">
-        <Link to={`/user/${p.uid}`} aria-label={p.username} className="inline-block">
-          {/* 加V认证徽章（头像右下角 V 标，title=头衔） */}
-          <span className="relative inline-block">
-            <Avatar uid={p.uid} avatar={p.avatar} username={p.username} size={3} />
-            <VBadge v={p.v} size={3} />
+        {p.isGuest ? (
+          <span className="inline-block" aria-label={`${t('guest_prefix')}·${p.username}`}>
+            <span className="relative inline-block">
+              <Avatar uid={p.uid} avatar={p.avatar} username={p.username} size={3} />
+              <VBadge v={p.v} size={3} />
+            </span>
           </span>
-        </Link>
+        ) : (
+          <Link to={`/user/${p.uid}`} aria-label={p.username} className="inline-block">
+            {/* 加V认证徽章（头像右下角 V 标，title=头衔） */}
+            <span className="relative inline-block">
+              <Avatar uid={p.uid} avatar={p.avatar} username={p.username} size={3} />
+              <VBadge v={p.v} size={3} />
+            </span>
+          </Link>
+        )}
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-start justify-between gap-3 text-xs text-lt-grey">
           <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
-            <Link className="text-sm font-bold text-lt-grey transition-colors hover:text-brand" to={`/user/${p.uid}`}>
-              {p.username}
-            </Link>
+            {p.isGuest ? (
+              <span className="text-sm font-bold text-lt-grey">
+                {t('guest_prefix')}·{p.username}
+              </span>
+            ) : (
+              <Link className="text-sm font-bold text-lt-grey transition-colors hover:text-brand" to={`/user/${p.uid}`}>
+                {p.username}
+              </Link>
+            )}
             {!light.postShowTime && <span className="text-lt-grey">{fmtDate(p.createDate)}</span>}
             {p.userip !== undefined && <span title={t('ip_visible_tip')}>IP {fmtIp(p.userip)}</span>}
             {/* 楼层号（.floor-parent.badge.badge-secondary：#909399 底白字胶囊；热门回复卡 floor=0 不显示） */}

@@ -81,8 +81,8 @@ async function sendWithCsrf<T>(doFetch: () => Promise<Response>): Promise<T> {
 }
 
 /** 信封解包（§6.1）：code<0 抛出；data 平铺返回 */
-export async function apiGet<T>(path: string): Promise<T> {
-  const res = await request(path, { credentials: 'include' });
+export async function apiGet<T>(path: string, headers?: Record<string, string>): Promise<T> {
+  const res = await request(path, { credentials: 'include', headers });
   return unwrap<T>((await envelopeOf(res)) as ApiEnvelope & { data?: T });
 }
 
@@ -718,8 +718,13 @@ export function saveBackground(imgsrc: string): Promise<{ bgimg: string }> {
 }
 
 /** 楼层「查看所有回复」（show_all_reply）：某楼层 pid 的全部直接回复（quotepid=pid，每页 20） */
-export function fetchPostReplies(pid: number, page = 1): Promise<PostRepliesData> {
-  return apiGet<PostRepliesData>(`/api/posts/${pid}/replies?page=${page}`);
+export function fetchPostReplies(pid: number, page = 1, guestToken = ''): Promise<PostRepliesData> {
+  // 访客认领自己的待审回复（同帖子详情口径；调用方只在未登录时传令牌，避免
+  // 同一浏览器换账号登录后仍认领前一位访客的待审帖）。
+  return apiGet<PostRepliesData>(
+    `/api/posts/${pid}/replies?page=${page}`,
+    guestToken ? { 'X-Guest-Token': guestToken } : undefined,
+  );
 }
 
 /* ---------------- VIP 收银台（后端 6 端点接线） ---------------- */

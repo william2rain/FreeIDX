@@ -26,7 +26,8 @@ export const FORUM_COLS =
 
 /** 详情页回帖：取 fmt 展示 + message 原文（冻结契约 PostItem.message? "仅详情页返回"，供内联编辑初值）；ok 为审核位 */
 export const POST_PAGE_COLS =
-  'pid,tid,uid,isfirst,create_date,userip,images,files,doctype,quotepid,message,message_fmt,ok';
+  // guest_name（0025）：访客帖昵称；guest_token_hash 绝不进读路径（只用于服务端认领匹配，不下发）
+  'pid,tid,uid,isfirst,create_date,userip,images,files,doctype,quotepid,message,message_fmt,ok,guest_name';
 
 /** avatar_auto 为预设头像路径（'0'=未用预设；解析语义见 modules/shared.ts avatarAutoOf)；
  *  bgimg 为主页背景预设编号（'0'=默认 bg-0.png，0016 迁移新增） */

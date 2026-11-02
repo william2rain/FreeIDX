@@ -19,6 +19,7 @@ import { NotFoundPage } from './NotFoundPage';
 import { Turnstile, turnstileDisabled } from '../../../components/Turnstile';
 import { Alert, Breadcrumb, Button, Card, Modal, TagBadge, cx } from '../../../components/ui';
 import { useReadUnread } from '../../../hooks/useReadUnread';
+import { getGuestToken, readGuestToken } from '../../../lib/guest';
 import { useAuth } from '../../../store/auth';
 import { useAuthModal } from '../../../store/authModal';
 import { useT, useGroupName } from '../../../lib/i18n';
@@ -211,7 +212,7 @@ export function ThreadPage() {
   const grouplist = useAuth((s) => s.grouplist);
   const setting = useAuth((s) => s.setting);
   /* 编辑器 chunk 空闲预热（C3）：把 400KB 下载移出首帧关键路径，又不让「高级回复」点击等下载。
-     仅登录用户需要（游客没有回复框，预热纯属浪费流量）；me 由 bootstrap 异步到达，故依赖它。
+     仅登录用户需要（访客只用快捷回复框，不用高级编辑器，预热纯属浪费流量）；me 由 bootstrap 异步到达，故依赖它。
      空闲回调不可用时退化为 2.5s 定时（仍晚于首屏），失败由 lazy 真正渲染时重试。 */
   const canCompose = Boolean(me);
   useEffect(() => {
@@ -256,7 +257,7 @@ export function ThreadPage() {
   const [repliesPid, setRepliesPid] = useState<number | null>(null);
   const replies = useQuery({
     queryKey: ['post-replies', repliesPid],
-    queryFn: () => fetchPostReplies(repliesPid as number, 1),
+    queryFn: () => fetchPostReplies(repliesPid as number, 1, me ? '' : readGuestToken()),
     enabled: repliesPid !== null,
     staleTime: 30_000,
   });
@@ -350,11 +351,20 @@ export function ThreadPage() {
     void qc.invalidateQueries({ queryKey: ['threads'] });
   };
 
-  const queryKey = ['thread', tid, page];
+  // 访客昵称（仅访客快捷回复用；登录用户走账号名，不用此字段）
+  const [guestName, setGuestName] = useState('');
+  const queryKey = ['thread', tid, page, me?.uid ?? 0];
   const q = useQuery({
     queryKey,
-    queryFn: () =>
-      apiGet<ThreadDetail>(`/api/threads/${tid}?page=${page}`),
+    queryFn: () => {
+      // 访客认领自己的待审留言：附带 X-Guest-Token 头（localStorage 令牌），
+      // 后端只拿它匹配本人的待审帖哈希，绝不下发哈希本身。登录用户不带此头。
+      const token = me ? '' : readGuestToken();
+      return apiGet<ThreadDetail>(
+        `/api/threads/${tid}?page=${page}`,
+        token ? { 'X-Guest-Token': token } : undefined,
+      );
+    },
     placeholderData: keepPreviousData,
   });
 
@@ -438,13 +448,14 @@ export function ThreadPage() {
   const fid = th?.fid ?? 0;
 
   const reply = useMutation({
-    mutationFn: (vars: ComposerSubmit & { quotepid: number }) =>
+    mutationFn: (vars: ComposerSubmit & { quotepid: number; guestName?: string; guestToken?: string }) =>
       createReply(tid, {
         message: vars.html,
         doctype: 0,
         quotepid: vars.quotepid > 0 ? vars.quotepid : undefined,
         attachAids: vars.attachAids,
         turnstileToken: vars.turnstileToken,
+        ...(vars.guestName ? { guestName: vars.guestName, guestToken: vars.guestToken } : {}),
       }),
     onMutate: async (vars) => {
       await qc.cancelQueries({ queryKey });
@@ -466,6 +477,31 @@ export function ThreadPage() {
           createDate: Math.floor(Date.now() / 1000),
           /* 乐观回帖视为已过审（提交后以服务端刷新为准；未过审主题下本人可见自己内容） */
           ok: 1,
+          allowupdate: false,
+          allowdelete: false,
+          likes: 0,
+          liked: false,
+          quoted: quoted ? { pid: quoted.pid, username: quoted.username, messageSnippet: quoted.snippet } : undefined,
+        };
+        qc.setQueryData<ThreadDetail>(queryKey, { ...prev, posts: { ...prev.posts, list: [...prev.posts.list, temp] } });
+      } else if (prev && !me && vars.guestName) {
+        // 访客乐观回帖：ok=0（待审），提交后以服务端刷新为准（服务端凭令牌返回本人待审帖）。
+        const temp: PostItem = {
+          pid: -Date.now(),
+          tid,
+          uid: 0,
+          username: vars.guestName,
+          avatar: 0,
+          isGuest: true,
+          isfirst: 0,
+          doctype: 0,
+          quotepid: vars.quotepid,
+          message: vars.html,
+          messageFmt: vars.html,
+          images: 0,
+          files: 0,
+          createDate: Math.floor(Date.now() / 1000),
+          ok: 0,
           allowupdate: false,
           allowdelete: false,
           likes: 0,
@@ -539,10 +575,7 @@ export function ThreadPage() {
   });
 
   const onReplyClick = (post: PostItem) => {
-    if (!me) {
-      openAuth('login');
-      return;
-    }
+    // 访客也可引用回复：不再弹登录，引用后滚到快捷回复框（访客框在 allowpost 时渲染）。
     setQuoted({ pid: post.pid, username: post.username, snippet: snippetOf(post.messageFmt) });
     if (advanced || opEditing) return;
     composerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -563,13 +596,25 @@ export function ThreadPage() {
       setQuickErr(t('please_input_message'));
       return;
     }
+    // 访客提交：必须填昵称（后端同样校验，前端先拦可少一次往返）；令牌此时生成并存 localStorage。
+    const name = me ? '' : guestName.trim();
+    if (!me && !name) {
+      setQuickErr(t('guest_nickname_placeholder'));
+      return;
+    }
     if (!turnstileDisabled() && !quickTs) {
       setQuickErr(t('please_complete_captcha'));
       return;
     }
     const html = `<p>${text.split(/\n+/).map(esc).join('</p><p>')}</p>`;
     try {
-      await reply.mutateAsync({ html, attachAids: [], turnstileToken: quickTs, quotepid: quoted?.pid ?? 0 });
+      await reply.mutateAsync({
+        html,
+        attachAids: [],
+        turnstileToken: quickTs,
+        quotepid: quoted?.pid ?? 0,
+        ...(me ? {} : { guestName: name, guestToken: getGuestToken() }),
+      });
       setQuick('');
     } catch (e) {
       setQuickErr(e instanceof Error ? e.message : t('submit_failed'));
@@ -640,13 +685,9 @@ export function ThreadPage() {
   };
 
   const href = (p: number) => (p === 1 ? `/thread/${tid}` : `/thread/${tid}/p/${p}`);
-  /** 卡脚/悬浮条“回复”钮：滚到快捷回复框并聚焦 */
+  /** 卡脚/悬浮条“回复”钮：滚到快捷回复框并聚焦（访客框同样在此，allowpost 时渲染，不再弹登录） */
   const focusReply = (e?: MouseEvent) => {
     e?.preventDefault();
-    if (!me) {
-      openAuth('login');
-      return;
-    }
     composerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     composerRef.current?.querySelector('textarea')?.focus();
   };
@@ -1142,6 +1183,68 @@ export function ThreadPage() {
                           </div>
                         </div>
                       )}
+                    </div>
+                  </div>
+                ) : perms?.allowpost && !me ? (
+                  /* 访客快捷回复框：仅回帖（不发主题）、必须填昵称、每次提交过验证码、
+                     每 IP 每天 ≤3 条（后端计数）、一律先审后放（本人可见自己的待审帖）。
+                     高级回复/附件不对访客开放。 */
+                  <div id="pid-new" ref={composerRef} className="flex items-start gap-2.5">
+                    <div className="min-w-0 flex-1">
+                      <div className="mb-2 flex items-center gap-2 text-xs">
+                        <label htmlFor="guest_nickname" className="shrink-0 text-sm font-medium text-foreground">
+                          {t('guest_nickname_label')}
+                        </label>
+                        <input
+                          id="guest_nickname"
+                          type="text"
+                          maxLength={20}
+                          className="h-10 w-48 rounded-[4px] border border-[#ced4da] bg-card px-2 text-sm text-foreground outline-none transition-colors focus:border-[#a0cfff] focus:ring-3 focus:ring-[rgba(64,158,255,0.25)]"
+                          placeholder={t('guest_nickname_placeholder')}
+                          value={guestName}
+                          onChange={(e) => setGuestName(e.target.value)}
+                        />
+                        {guestName.trim() && (
+                          <span className="text-lt-grey">
+                            {t('guest_prefix')}·{guestName.trim()}
+                          </span>
+                        )}
+                      </div>
+                      {quoted && (
+                        <blockquote className="relative my-2 border-l-[5px] border-brand bg-zh-quote p-3 pr-9 text-xs leading-5 text-ink-soft">
+                          <button
+                            className="absolute right-1.5 top-1.5 flex size-6 items-center justify-center text-zh-grey transition-colors hover:text-brand"
+                            aria-label={t('cancel_quote_aria')}
+                            onClick={() => setQuoted(null)}
+                          >
+                            <Icon name="close" className="size-3.5" />
+                          </button>
+                          {t('reply')} <span className="font-medium">#{quoted.pid}</span> {quoted.username}
+                          {t('full_colon')}
+                          {quoted.snippet}
+                        </blockquote>
+                      )}
+                      <textarea
+                        id="quick_reply_text"
+                        className="min-h-[5rem] w-full resize-none rounded-[4px] border border-[#ced4da] bg-card px-3 py-2 text-sm leading-6 text-foreground outline-none transition-[border-color,box-shadow] placeholder:text-zh-grey focus:border-[#a0cfff] focus:ring-3 focus:ring-[rgba(64,158,255,0.25)]"
+                        placeholder={t('join_reply_placeholder')}
+                        value={quick}
+                        onChange={(e) => setQuick(e.target.value)}
+                      />
+                      <Turnstile key={quickNonce} onToken={setQuickTs} />
+                      {quickErr && <p className="mt-1 text-xs text-destructive">{quickErr}</p>}
+                      <p className="mt-1 text-xs text-lt-grey">{t('guest_reply_hint')}</p>
+                      <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                        <button
+                          type="button"
+                          disabled={reply.isPending}
+                          onClick={() => void submitQuick()}
+                          className="inline-flex h-[38px] select-none items-center justify-center gap-1.5 whitespace-nowrap rounded-[6px] bg-brand px-5 text-sm font-medium text-white transition-colors hover:bg-brand-hover disabled:pointer-events-none disabled:opacity-50"
+                        >
+                          {reply.isPending && <Icon name="refresh" className="size-3.5 animate-spin" />}
+                          {reply.isPending ? t('submitting') : t('reply_btn')}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ) : th.closed > 0 ? (

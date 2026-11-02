@@ -112,6 +112,8 @@ export interface PostReplyItem {
   uid: number;
   username: string;
   avatar: number;
+  /** 访客帖标记（同 PostItem.isGuest） */
+  isGuest?: boolean;
   /** 预设头像路径（avatar=0 且 avatar_auto 非 '0' 时下发） */
   avatar_auto?: string;
   createDate: number;
@@ -153,6 +155,8 @@ export interface PostItem {
   tid: number;
   uid: number;
   username: string;
+  /** 访客帖标记：uid=0 且 guest_name 非空时为 true；展示时须带游客标识，绝不链到 /user/0 */
+  isGuest?: boolean;
   avatar: number;
   /** 作者认证头衔（'0'=未认证；楼层头像旁 V 标 title） */
   v?: string;
@@ -376,6 +380,9 @@ export interface CreatePostReq {
   quotepid?: number;
   attachAids?: number[];
   turnstileToken?: string;
+  /** 访客回帖专用：昵称（登录回帖忽略）；访客令牌（前端 localStorage 随机串，后端只存其哈希） */
+  guestName?: string;
+  guestToken?: string;
 }
 
 export interface ModThreadsReq {

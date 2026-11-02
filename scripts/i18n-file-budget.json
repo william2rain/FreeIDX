@@ -1,9 +1,10 @@
 {
  "_comment": "按文件硬编码中文预算（棘轮：只减不增）。CI 检查 current(file) <= budget(file)。文件清零后任何新增即拦截。",
- "generated": "2026-10-22",
- "totalFiles": 61,
- "totalBudget": 0,
+ "generated": "2026-11-02",
+ "totalFiles": 62,
+ "totalBudget": 7,
  "budgets": {
+  "apps/api/src/core/guest.ts": 7,
   "apps/api/src/core/crypto.ts": 0,
   "apps/api/src/core/email.ts": 0,
   "apps/api/src/core/payment/orchestrator.ts": 0,

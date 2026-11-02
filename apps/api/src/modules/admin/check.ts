@@ -73,7 +73,7 @@ export function adminCheckRoutes(): Hono<ReadEnv> {
     // 列：主题 + 作者 + 发表时间 + pid + 内容（原文纯文本，前端默认转义渲染）
     const rows = await db
       .prepare<Record<string, unknown>>(
-        `SELECT p.pid, p.tid, p.uid, u.username, p.create_date, p.message, t.subject
+        `SELECT p.pid, p.tid, p.uid, COALESCE(u.username, p.guest_name) AS username, p.guest_name, p.create_date, p.message, t.subject
          FROM bbs_post p
          LEFT JOIN bbs_thread t ON t.tid = p.tid
          LEFT JOIN bbs_user u ON u.uid = p.uid
