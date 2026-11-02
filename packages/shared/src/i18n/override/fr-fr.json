@@ -187,6 +187,7 @@
   "guest_nickname_label": "Pseudo invité",
   "guest_nickname_placeholder": "Saisissez un pseudo pour répondre",
   "guest_reply_hint": "Les réponses invités ne sont publiques qu’après validation ; jusque-là, vous seul la voyez.",
+  "guest_reply_submitted": "Votre réponse d’invité a été envoyée. Elle sera publique après validation ; jusque-là, vous seul la voyez.",
   "guest_prefix": "Invité",
   "have_account": "Vous avez déjà un compte ?",
   "his_followers": "Abonnés",

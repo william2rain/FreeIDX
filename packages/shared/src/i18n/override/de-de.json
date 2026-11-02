@@ -187,6 +187,7 @@
   "guest_nickname_label": "Gastname",
   "guest_nickname_placeholder": "Nickname eingeben, um zu antworten",
   "guest_reply_hint": "Gastantworten werden erst nach Prüfung öffentlich; bis dahin nur für dich sichtbar.",
+  "guest_reply_submitted": "Deine Gastantwort wurde eingereicht und wird nach der Prüfung öffentlich; bis dahin siehst nur du sie.",
   "guest_prefix": "Gast",
   "have_account": "Schon ein Konto?",
   "his_followers": "Follower",

@@ -196,6 +196,8 @@ export function ThreadPage() {
   const [quickTs, setQuickTs] = useState('');
   const [quickNonce, setQuickNonce] = useState(0);
   const [quickErr, setQuickErr] = useState('');
+  /* 访客提交成功反馈：之前提交后只清空输入框、无任何提示，访客无法确认留言是否已交待审。 */
+  const [guestSuccess, setGuestSuccess] = useState('');
   /* 快速回复下拉（[默认语, ...# 分隔备选语]，首项 value=0 选中不动作） */
   const quickReplyMsg = useQuery({
     queryKey: ['quick-reply-message'],
@@ -591,6 +593,7 @@ export function ThreadPage() {
   /** overrideText：快速回复下拉选中即发（赋值后立刻提交，不等 React 状态回写） */
   const submitQuick = async (overrideText?: string) => {
     setQuickErr('');
+    setGuestSuccess('');
     const text = (overrideText ?? quick).trim();
     if (!text) {
       setQuickErr(t('please_input_message'));
@@ -616,6 +619,9 @@ export function ThreadPage() {
         ...(me ? {} : { guestName: name, guestToken: getGuestToken() }),
       });
       setQuick('');
+      // 访客提交成功后明确告知：已交待审、审核前仅本人可见。服务端刷新（onSettled 失效
+      // 详情查询，带令牌绕开边缘缓存）会把本人待审帖带回列表；乐观帖先行展示，不等待刷新。
+      if (!me) setGuestSuccess(t('guest_reply_submitted'));
     } catch (e) {
       setQuickErr(e instanceof Error ? e.message : t('submit_failed'));
     } finally {
@@ -1233,6 +1239,7 @@ export function ThreadPage() {
                       />
                       <Turnstile key={quickNonce} onToken={setQuickTs} />
                       {quickErr && <p className="mt-1 text-xs text-destructive">{quickErr}</p>}
+                      {guestSuccess && <p className="mt-1 text-xs text-brand">{guestSuccess}</p>}
                       <p className="mt-1 text-xs text-lt-grey">{t('guest_reply_hint')}</p>
                       <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
                         <button

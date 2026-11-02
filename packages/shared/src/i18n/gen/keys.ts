@@ -233,6 +233,7 @@ export type FrontKey =
   | 'guest_nickname_placeholder'
   | 'guest_prefix'
   | 'guest_reply_hint'
+  | 'guest_reply_submitted'
   | 'have_account'
   | 'his_followers'
   | 'his_following'

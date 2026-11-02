@@ -187,6 +187,7 @@
   "guest_nickname_label": "Guest nickname",
   "guest_nickname_placeholder": "Enter a nickname to reply",
   "guest_reply_hint": "Guest replies are public only after review; until then only you can see yours.",
+  "guest_reply_submitted": "Your guest reply has been submitted. It will be public after review; until then only you can see it.",
   "guest_prefix": "Guest",
   "have_account": "Already have an account?",
   "his_followers": "Followers",

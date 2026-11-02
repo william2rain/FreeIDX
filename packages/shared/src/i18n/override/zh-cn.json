@@ -187,6 +187,7 @@
   "guest_nickname_label": "访客昵称",
   "guest_nickname_placeholder": "填写昵称后才能留言",
   "guest_reply_hint": "访客留言需审核后公开，审核前只有你自己能看到。",
+  "guest_reply_submitted": "留言已提交，待审核后公开，审核前只有你自己能看到。",
   "guest_prefix": "游客",
   "have_account": "已有账号？",
   "his_followers": "关注Ta的",

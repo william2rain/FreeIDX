@@ -194,9 +194,20 @@ export function maybeCtx(c: unknown): Waiter | undefined {
  * 要求 csrf Cookie 是刻意的——它等价于"该访客已完成过一次首访"：
  * 首访响应带 Set-Cookie，按下面的写入门槛必然穿透并签发 csrf Cookie；
  * 此后第二次请求才可能吃到 HIT，于是边缘缓存永远不会吞掉 csrf Cookie 的签发（写链路不受影响）。
+ *
+ * 访客令牌例外（2026-11-02 线上缺陷根因）：带 X-Guest-Token 头的请求是个人化的——
+ * 详情接口凭它返回请求方自己的待审访客帖，而缓存键只有 URL（+fi-ua/fi-lang），
+ * 没有令牌维度。若允许这类请求命中/写入共享缓存，会同时造成两个后果：
+ *  1. 本人看不到自己的待审帖：提交前缓存的通用副本（无待审帖）在 60s TTL 内
+ *     持续命中，提交后的刷新也一样（线上实测：列表一直为空、刷新后仍不可见）；
+ *  2. 个人化响应泄露：一次带令牌的 MISS 若被写进共享键，其他访客在 TTL 内
+ *     命中同一副本时会看到别人的待审帖。
+ * 故带此头的请求一律绕开边缘缓存（既不读也不写）；这类请求量小（仅有待审帖的
+ * 访客会带令牌），对命中率的影响可忽略。
  */
 function isCacheEligible(req: { headers: Headers }): boolean {
   if (req.headers.has('authorization')) return false;
+  if (req.headers.has('x-guest-token')) return false;
   const cookie = req.headers.get('cookie') ?? '';
   return !PERSONAL_COOKIE.test(cookie) && /(?:^|;\s*)csrf=/.test(cookie);
 }

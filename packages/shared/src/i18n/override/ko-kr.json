@@ -187,6 +187,7 @@
   "guest_nickname_label": "게스트 닉네임",
   "guest_nickname_placeholder": "답글을 달려면 닉네임을 입력하세요",
   "guest_reply_hint": "게스트 답글은 검토 후 공개됩니다. 그 전까지는 본인만 볼 수 있습니다.",
+  "guest_reply_submitted": "게스트 답글이 제출되었습니다. 검토 후 공개되며, 그 전까지는 본인만 볼 수 있습니다.",
   "guest_prefix": "게스트",
   "have_account": "이미 계정이 있으신가요?",
   "his_followers": "팔로워",

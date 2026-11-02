@@ -187,6 +187,7 @@
   "guest_nickname_label": "ゲスト名",
   "guest_nickname_placeholder": "返信するには名前を入力してください",
   "guest_reply_hint": "ゲストの返信は審査後に公開されます。それまではあなただけが見ることができます。",
+  "guest_reply_submitted": "ゲストの返信を送信しました。審査後に公開されます。それまではあなただけが見ることができます。",
   "guest_prefix": "ゲスト",
   "have_account": "既にアカウントをお持ちですか？",
   "his_followers": "フォロワー",
